@@ -1,0 +1,133 @@
+name: Create BookStack Page on New Issue
+
+on: 
+  issues: 
+    types: [opened, closed, reopened]
+    
+jobs: 
+  createPage: 
+    runs-on: ubuntu-latest 
+    steps:
+    - name: Setup Node.js 
+      uses: actions/setup-node@v3 
+      with: 
+        node-version: 18
+      
+    - name: Create HTML and send to BookStack 
+      env: 
+        BOOKSTACK_API_ID: ${{ secrets.BOOKSTACK_API_ID }} 
+        BOOKSTACK_API_SECRET: ${{ secrets.BOOKSTACK_API_SECRET }} 
+        BOOKSTACK_URL: ${{ secrets.BOOKSTACK_URL }} 
+        BOOKSTACK_BOOK_ID: ${{ secrets.BOOKSTACK_BOOK_ID }}
+        ISSUE_TITLE: ${{ github.event.issue.title }}
+        ISSUE_BODY: ${{ github.event.issue.body }} 
+        ISSUE_URL: ${{ github.event.issue.html_url }}
+        ISSUE_STATE: ${{ github.event.issue.state }}
+        ISSUE_ACTION: ${{ github.event.action }}
+      run: | 
+        mkdir page-generator 
+        cd page-generator 
+        npm init -y > /dev/null 
+        npm install marked node-fetch@2 > /dev/null 
+        
+        # Создаем JS файл без heredoc
+        cat << 'EOF' > create-page.js
+        const fetch = require('node-fetch');
+        const marked = require('marked');
+        
+        const title = process.env.ISSUE_TITLE;
+        const body = process.env.ISSUE_BODY || 'Нет описания';
+        const url = process.env.ISSUE_URL;
+        const state = process.env.ISSUE_STATE;
+        const action = process.env.ISSUE_ACTION;
+        
+        let statusText, statusColor;
+        if (state === 'closed') {
+          statusText = 'ЗАКРЫТО';
+          statusColor = '#d73a49';
+        } else if (state === 'open' && action === 'reopened') {
+          statusText = 'ПЕРЕОТКРЫТО'; 
+          statusColor = '#0366d6';
+        } else {
+          statusText = 'ОТКРЫТО';
+          statusColor = '#28a745';
+        }
+        
+        const htmlBody = marked.parse(body);
+        const fullHtml = `
+          <div style="background: ${statusColor}; color: white; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
+            <strong>Статус задачи:</strong> ${statusText}
+          </div>
+          <p><strong>Связанная задача:</strong> <a href="${url}">${url}</a></p>
+          <hr>
+          ${htmlBody}
+        `;
+        
+        const payload = {
+          name: title,
+          book_id: process.env.BOOKSTACK_BOOK_ID,
+          html: fullHtml
+        };
+        
+        // Функция для поиска существующей страницы
+        async function findExistingPage() {
+          const searchUrl = `${process.env.BOOKSTACK_URL}/api/pages?filter[name]=${encodeURIComponent(title)}`;
+          
+          const response = await fetch(searchUrl, {
+            headers: {
+              'Authorization': `Token ${process.env.BOOKSTACK_API_ID}:${process.env.BOOKSTACK_API_SECRET}`,
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (!response.ok) return null;
+          
+          const data = await response.json();
+          
+          const exactMatch = data.data.find(page => page.name === title);
+          return exactMatch ? exactMatch.id : null;
+        }
+        
+        // Основная логика
+        async function main() {
+          try { 
+            const existingPageId = await findExistingPage();
+            
+            let apiUrl, method;
+            if (existingPageId) {
+              apiUrl = `${process.env.BOOKSTACK_URL}/api/pages/${existingPageId}`;
+              method = 'PUT';
+              console.log('Updating existing page:', existingPageId);
+            } else {
+              apiUrl = `${process.env.BOOKSTACK_URL}/api/pages`;
+              method = 'POST';
+              console.log('Creating new page');
+            }
+            
+            const response = await fetch(apiUrl, {
+              method: method,
+              headers: {
+                'Authorization': `Token ${process.env.BOOKSTACK_API_ID}:${process.env.BOOKSTACK_API_SECRET}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(payload)
+            });
+            
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error('Failed to process page:', response.status, errorText);
+              process.exit(1);
+            } else {
+              const action = existingPageId ? 'updated' : 'created';
+              console.log(`Page ${action} successfully with status: ${statusText}`);
+            }
+          } catch (err) {
+            console.error('Request error:', err);
+            process.exit(1);
+          }
+        }
+        
+        main();
+        EOF
+        
+        node create-page.js
